@@ -1,0 +1,65 @@
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:11434/api/tags || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  transcriber:
+    build: ./services/transcriber
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./shared/recordings:/app/recordings:ro
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - WHISPER_MODEL=${WHISPER_MODEL:-base.en}
+    restart: unless-stopped
+
+  extractor:
+    build: ./services/extractor
+    depends_on:
+      redis:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - OLLAMA_URL=http://ollama:11434
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-phi3}
+    restart: unless-stopped
+
+  map:
+    build: ./services/map
+    ports:
+      - "3000:3000"
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - VITE_MAPBOX_TOKEN=${MAPBOX_TOKEN}
+    restart: unless-stopped
+
+volumes:
+  redis-data:
+  ollama-data:

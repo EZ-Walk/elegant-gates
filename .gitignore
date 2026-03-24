@@ -1,0 +1,7 @@
+.env
+shared/recordings/*.wav
+node_modules/
+dist/
+__pycache__/
+*.pyc
+.venv/
