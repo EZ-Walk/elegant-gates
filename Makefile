@@ -18,7 +18,7 @@ logs:
 clean:
 	rm -f shared/recordings/*.wav
 
-# End-to-end test — pass AUDIO=path/to/file.m4a
+# End-to-end test - pass AUDIO=path/to/file.m4a
 # Usage: make test AUDIO=tests/test_001.m4a
 test:
 	@test -n "$(AUDIO)" || (echo "Usage: make test AUDIO=path/to/file.m4a" && exit 1)
