@@ -2,7 +2,6 @@
 
 const express = require("express");
 const cors = require("cors");
-const path = require("path");
 const Redis = require("ioredis");
 
 const PORT = 3000;
@@ -38,13 +37,6 @@ function createRedisClient(label) {
 // One client for commands, one dedicated subscriber for pub/sub
 const redisCmd = createRedisClient("cmd");
 const redisSub = createRedisClient("sub");
-
-// ---------------------------------------------------------------------------
-// Static files (built React app)
-// ---------------------------------------------------------------------------
-
-const distDir = path.join(__dirname, "..", "dist");
-app.use(express.static(distDir));
 
 // ---------------------------------------------------------------------------
 // GET /api/communications
@@ -138,19 +130,10 @@ redisSub.on("message", (channel, message) => {
 });
 
 // ---------------------------------------------------------------------------
-// SPA fallback — serve index.html for any unknown routes
-// ---------------------------------------------------------------------------
-
-app.get("*", (req, res) => {
-  res.sendFile(path.join(distDir, "index.html"));
-});
-
-// ---------------------------------------------------------------------------
 // Start server
 // ---------------------------------------------------------------------------
 
 app.listen(PORT, () => {
   console.log(`[server] VHF14 Map API listening on port ${PORT}`);
   console.log(`[server] Redis URL: ${REDIS_URL}`);
-  console.log(`[server] Serving static files from: ${distDir}`);
 });

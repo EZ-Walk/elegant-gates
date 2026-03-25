@@ -38,11 +38,10 @@ services:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
-  map:
+  api:
     build:
       context: ./services/map
-      args:
-        VITE_MAPBOX_TOKEN: ${MAPBOX_TOKEN}
+      dockerfile: Dockerfile.api
     ports:
       - "3000:3000"
     depends_on:

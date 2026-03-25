@@ -6,6 +6,10 @@ import { useSSE } from "./hooks/useSSE.js";
 // Mapbox token injected at build time via Vite
 mapboxgl.accessToken = import.meta.env.VITE_MAPBOX_TOKEN || "";
 
+// API base URL — set VITE_API_URL for distributed deployments (e.g. Tailscale Funnel URL).
+// Falls back to relative paths for local development.
+const API_BASE = import.meta.env.VITE_API_URL || "";
+
 // San Francisco Bay
 const DEFAULT_CENTER = [-122.4, 37.8];
 const DEFAULT_ZOOM = 20;
@@ -125,7 +129,7 @@ export default function App() {
   const [selectedId, setSelectedId] = useState(null);
   const [mapReady, setMapReady] = useState(false);
 
-  const { events: sseEvents, connected, error: sseError } = useSSE("/api/stream");
+  const { events: sseEvents, connected, error: sseError } = useSSE(`${API_BASE}/api/stream`);
 
   // -------------------------------------------------------------------------
   // Initialize Mapbox
@@ -192,7 +196,7 @@ export default function App() {
   // Fetch initial communications on load
   // -------------------------------------------------------------------------
   useEffect(() => {
-    fetch("/api/communications")
+    fetch(`${API_BASE}/api/communications`)
       .then((r) => r.json())
       .then((data) => {
         if (Array.isArray(data)) {

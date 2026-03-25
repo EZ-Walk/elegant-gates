@@ -4,110 +4,104 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-VHF14 is a marine radio monitor system designed to capture, transcribe, and analyze VHF marine radio communications. The system is built as a microservices architecture using Docker Compose for orchestration.
+VHF14 is a marine radio monitor system designed to capture, transcribe, and analyze VHF marine radio communications. The system is distributed across three physical nodes — a Raspberry Pi on the boat, an Intel Mac for processing, and Vercel for the frontend.
 
 ## Architecture
 
-The system consists of four main services:
+The system is split across three nodes:
 
-### Core Services
-- **recorder** - Captures VHF radio audio to WAV files in `shared/recordings/`
-- **transcriber** - Uses Whisper AI to convert audio recordings to text, stores results in Redis
-- **extractor** - Uses Ollama (phi3 model) to extract structured information from transcriptions
-- **map** - Web interface (port 3000) for visualizing radio communications on a map
+### Raspberry Pi (boat)
+- **recorder** — captures VHF radio audio in 30-second WAV chunks, rsyncs to the Mac
 
-### Infrastructure Services  
-- **redis** - Message broker and data store (port 6379)
-- **ollama** - Local LLM inference server (port 11434) running phi3 model
+### Intel Mac (`ez@ethans-sidequest`)
+- **transcriber** — Whisper AI, watches `shared/recordings/` for new WAVs
+- **extractor** — Gemini API, subscribes to Redis `transcriptions` channel
+- **redis** — message bus + data store (Docker internal, port 6379)
+- **api** — Express + SSE server (port 3000), exposed via Tailscale Funnel
+
+### Vercel
+- **map frontend** — React + Mapbox GL static SPA, calls the Mac's API via `VITE_API_URL`
+
+For full topology, env vars, and Redis schema details see `docs/ARCHITECTURE.md`.
 
 ## Development Commands
 
-### Environment Setup
+### Mac — start backend services
 ```bash
-# Start all services
-make up
-# OR
-docker compose up -d
-
-# Stop all services  
-make down
-# OR
-docker compose down
-
-# View logs from all services
-make logs
-# OR 
-docker compose logs -f
-
-# View logs from specific service
-docker compose logs -f <service-name>
+make up              # start redis, transcriber, extractor, api
+make down            # stop all
+make logs            # tail all service logs
+docker compose logs -f api   # tail a specific service
+docker compose up --build api  # rebuild and restart api
 ```
 
-### Recording and Processing
+### Mac — local frontend dev
 ```bash
-# Start radio recording (runs locally, not in container)
-make record
-# OR
-cd services/recorder && python recorder.py
-
-# Pull/update the LLM model
-make pull-model
-# OR
-docker compose exec ollama ollama pull phi3
-
-# Clean recorded audio files
-make clean
-# OR 
-rm -f shared/recordings/*.wav
+cd services/map
+npm install
+npm run dev          # Vite dev server on :5173, proxies /api to localhost:3000
+npm run build        # build to services/map/dist/
 ```
 
-### Service Management
+### Raspberry Pi — start recorder
 ```bash
-# Rebuild and restart specific service
-docker compose up --build <service-name>
+python recorder.py --list-devices
+python recorder.py --device 0 \
+  --remote ez@ethans-sidequest:/path/to/vhf14/shared/recordings/ \
+  --cleanup
+```
 
-# Access service shell for debugging
-docker compose exec <service-name> /bin/bash
+### Vercel — deploy frontend
+```bash
+vercel deploy        # from repo root; vercel.json points to services/map
+```
 
-# Check service health
-docker compose ps
+### Tests
+```bash
+make test AUDIO=tests/test_001.m4a
+# or
+python -m pytest tests/ -v --audio tests/test_001.m4a
+```
+
+### Clean recordings
+```bash
+make clean           # rm -f shared/recordings/*.wav
 ```
 
 ## Configuration
 
-### Environment Variables
-Configure in `.env` file:
-- `MAPBOX_TOKEN` - Required for map service visualization
-- `OLLAMA_MODEL` - LLM model for information extraction (default: phi3)
-- `WHISPER_MODEL` - Speech recognition model (default: base.en)
+### Mac `.env` file
+- `WHISPER_MODEL` — Whisper model size (default: `base.en`)
+- `GEMINI_API_KEY` — Google Gemini API key (required for extractor)
+- `GEMINI_MODEL` — Gemini model (default: `gemini-2.0-flash`)
+- `LM_STUDIO_URL` — fallback LLM endpoint if no Gemini key
+- `LM_STUDIO_MODEL` — LM Studio model name
 
-### Data Flow
-1. **recorder** saves audio files to `shared/recordings/*.wav`
-2. **transcriber** monitors recordings, transcribes audio, stores text in Redis
-3. **extractor** processes transcriptions through LLM, extracts structured data
-4. **map** service serves web interface showing processed communications
+### Vercel environment variables (set in dashboard)
+- `VITE_MAPBOX_TOKEN` — Mapbox public token (build-time)
+- `VITE_API_URL` — Tailscale Funnel URL (e.g. `https://ethans-sidequest.tail-xxxxx.ts.net`)
 
-### Service Dependencies
-- transcriber depends on Redis
-- extractor depends on Redis + Ollama  
-- map depends on Redis
-- All services restart automatically unless stopped
+## Data Flow
+1. **recorder** (Pi) writes `recording_YYYYMMDD_HHMMSS.wav` → rsyncs to Mac's `shared/recordings/`
+2. **transcriber** (Mac) detects new WAV, Whisper transcribes → publishes to Redis `transcriptions` channel
+3. **extractor** (Mac) subscribes to `transcriptions`, calls Gemini → writes to Redis `communications` list + publishes to `communications_updates` channel
+4. **api** (Mac) serves `GET /api/communications` (LRANGE) and `GET /api/stream` (SSE, subscribes to `communications_updates`)
+5. **frontend** (Vercel) fetches initial data + maintains SSE connection via the Tailscale Funnel URL
 
-## Development Notes
+## Service Communication
+- Recorder → Transcriber: filesystem (`shared/recordings/`), transferred via rsync over SSH
+- Transcriber → Extractor: Redis pub/sub (`transcriptions` channel)
+- Extractor → API: Redis list (`communications`) + pub/sub (`communications_updates`)
+- API → Frontend: REST (JSON) + SSE (Server-Sent Events) via Tailscale Funnel HTTPS
 
-### File Structure
-- `shared/recordings/` - Audio files shared between recorder and transcriber
-- `services/<name>/` - Individual service codebases
-- `docker-compose.yml` - Service definitions and networking
-- `Makefile` - Common development commands
-
-### Service Communication
-- Services communicate through Redis message queues
-- Ollama API used for LLM inference at http://ollama:11434
-- Map service exposes web interface on port 3000
-
-### Health Checks
-All services include health checks:
-- Redis: `redis-cli ping`
-- Ollama: API endpoint availability
-- Other services restart if unhealthy
+## File Structure
+- `shared/recordings/` — audio files shared between recorder (Pi) and transcriber (Mac Docker volume)
+- `services/recorder/` — Pi recorder service
+- `services/transcriber/` — Whisper transcription service
+- `services/extractor/` — LLM extraction service
+- `services/map/api/` — Express API server
+- `services/map/src/` — React frontend source
+- `docker-compose.yml` — Mac services (redis, transcriber, extractor, api)
+- `vercel.json` — Vercel build config for the frontend
+- `docs/ARCHITECTURE.md` — detailed environment reference
+- `docs/adr/` — architecture decision records

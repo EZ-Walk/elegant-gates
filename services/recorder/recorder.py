@@ -6,6 +6,7 @@ Runs locally (not in Docker) and saves to shared/recordings/ directory.
 
 import argparse
 import os
+import subprocess
 import sys
 import time
 from datetime import datetime
@@ -59,13 +60,31 @@ def save_recording(audio: np.ndarray, output_dir: Path) -> Path:
     return filepath
 
 
-def run_recorder(duration: int, device=None):
+def upload_recording(filepath: Path, remote: str, cleanup: bool) -> None:
+    """Rsync a WAV file to a remote destination, then optionally delete the local copy."""
+    try:
+        subprocess.run(
+            ["rsync", "-az", str(filepath), remote],
+            check=True,
+            capture_output=True,
+        )
+        print(f"  Uploaded to {remote}")
+        if cleanup:
+            filepath.unlink()
+            print(f"  Deleted local copy: {filepath.name}")
+    except subprocess.CalledProcessError as e:
+        print(f"  WARNING: rsync failed: {e.stderr.decode().strip()}", file=sys.stderr)
+
+
+def run_recorder(duration: int, device=None, remote: str = None, cleanup: bool = False):
     """
     Main recording loop.
 
     Args:
         duration: Total recording duration in seconds. 0 = infinite.
         device: Audio device index or None for default.
+        remote: Optional rsync destination (e.g. user@host:/path/to/recordings/).
+        cleanup: If True, delete local WAV after successful rsync.
     """
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -103,6 +122,8 @@ def run_recorder(duration: int, device=None):
             audio = record_chunk(device=device, duration=chunk_dur)
             filepath = save_recording(audio, OUTPUT_DIR)
             print(f"  Saved: {filepath.name}")
+            if remote:
+                upload_recording(filepath, remote, cleanup)
 
     except KeyboardInterrupt:
         print("\n\nRecording stopped by user.")
@@ -144,6 +165,18 @@ Examples:
         action="store_true",
         help="List available audio input devices and exit",
     )
+    parser.add_argument(
+        "--remote",
+        type=str,
+        default=None,
+        metavar="DEST",
+        help="Rsync destination for uploading recordings (e.g. user@host:/path/to/recordings/)",
+    )
+    parser.add_argument(
+        "--cleanup",
+        action="store_true",
+        help="Delete local WAV file after successful rsync upload (requires --remote)",
+    )
 
     args = parser.parse_args()
 
@@ -151,7 +184,7 @@ Examples:
         list_devices()
         sys.exit(0)
 
-    run_recorder(duration=args.duration, device=args.device)
+    run_recorder(duration=args.duration, device=args.device, remote=args.remote, cleanup=args.cleanup)
 
 
 if __name__ == "__main__":
