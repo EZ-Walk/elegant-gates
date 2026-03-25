@@ -2,19 +2,25 @@
 
 A real-time marine radio monitor that listens to VHF Channel 14, transcribes traffic, extracts vessel information, and charts ship courses on a live map.
 
+## Goal
+
+**See where ships are going — in real time, on a chart, without having to listen to the radio.**
+
+Radio → Transcript → Vessel name, course, position → Map with markers.
+
+## Requirements
+
+> **R1. No recordings lost.** Recordings are stored until they have been fully processed. Audio is never deleted before the transcript and extracted data are safely persisted.
+
+> **R2. Under 5 seconds end-to-end.** From the moment a radio call is captured, the vessel's position and course must be visible on the map within 5 seconds — no manual refresh, no delay.
+
+> **R3. Hot-plug the mic.** The microphone can be plugged in or unplugged at any time without interrupting the rest of the system. Recording resumes automatically when the mic is reconnected.
+
 ## Business Case
 
 Mariners and harbor operators need to track vessel movements in their area without the cognitive overhead of continuously monitoring a radio. VHF Channel 14 carries routine vessel traffic including position reports, course intentions, and safety calls. Today, that information is ephemeral — heard once and gone.
 
 VHF14 captures that radio traffic and turns it into a persistent, visual picture of vessel activity. A mariner can glance at the map and immediately see where ships are going, what they've reported, and whether any safety traffic has been broadcast — without missing anything that came through while they were busy.
-
-## Requirements
-
-| # | Requirement |
-|---|-------------|
-| R1 | Recordings are stored until they have been fully processed |
-| R2 | Vessel positions and courses are visible on the map within 5 seconds of a radio call |
-| R3 | The microphone can be plugged in or unplugged without interrupting the system |
 
 ## Level-1 Context Diagram
 
