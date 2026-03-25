@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-VHF14 Extractor - Subscribes to Redis 'transcriptions' channel, uses Ollama to
+VHF14 Extractor - Subscribes to Redis 'transcriptions' channel, uses LM Studio to
 extract structured information, and stores results in Redis 'communications' list.
 """
 
@@ -11,8 +11,8 @@ import time
 import uuid
 from datetime import datetime, timezone
 
-import httpx
 import redis
+from openai import OpenAI, APIConnectionError
 
 logging.basicConfig(
     level=logging.INFO,
@@ -22,31 +22,31 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
-OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://ollama:11434")
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "phi3")
+LM_STUDIO_URL = os.environ.get("LM_STUDIO_URL", "http://localhost:1234/v1")
+LM_STUDIO_MODEL = os.environ.get("LM_STUDIO_MODEL", "mlx-community/gemma-3-1b-it-qat-4bit")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
 MAX_COMMUNICATIONS = 100
-OLLAMA_TIMEOUT = 120.0  # seconds
 
+
+SYSTEM_PROMPT = "You are a VHF marine radio communications analyst. Extract structured data from radio transcriptions and respond only with valid JSON."
 
 EXTRACTION_PROMPT = """\
-You are a VHF marine radio communications analyst. Extract structured information from the following radio transcription.
+Extract structured information from this VHF marine radio transcription.
 
 Transcription: "{text}"
 
-Respond ONLY with a valid JSON object (no markdown, no explanation) with these exact fields:
-- "vessel": string or null - vessel name if mentioned
-- "callsign": string or null - radio callsign if mentioned (e.g. "WDG4321")
-- "channel": string or null - VHF channel number if mentioned (e.g. "16", "22A")
-- "lat": number or null - decimal latitude if a position is mentioned
-- "lon": number or null - decimal longitude if a position is mentioned
+Respond ONLY with a valid JSON object with these exact fields:
+- "vessel": string or null — vessel name if mentioned
+- "callsign": string or null — radio callsign if mentioned (e.g. "WDG4321")
+- "channel": string or null — VHF channel number if mentioned (e.g. "16", "22A")
+- "lat": number or null — decimal latitude if a position is mentioned
+- "lon": number or null — decimal longitude if a position is mentioned
 - "message_type": one of "routine", "safety", "distress", "traffic"
-- "summary": string - a concise one-sentence summary of the communication
-
-JSON response:"""
+- "summary": string — a concise one-sentence summary of the communication"""
 
 
 def build_communication(transcription: dict, extracted: dict) -> dict:
-    """Merge transcription data with extracted fields into a communication record."""
     return {
         "id": transcription.get("id", str(uuid.uuid4())),
         "timestamp": transcription.get("timestamp", datetime.now(timezone.utc).isoformat()),
@@ -61,50 +61,24 @@ def build_communication(transcription: dict, extracted: dict) -> dict:
     }
 
 
-def call_ollama(text: str, client: httpx.Client) -> dict:
-    """
-    Call Ollama API to extract structured data from transcription text.
-    Returns extracted dict, or a fallback dict on failure.
-    """
-    prompt = EXTRACTION_PROMPT.format(text=text)
-    payload = {
-        "model": OLLAMA_MODEL,
-        "prompt": prompt,
-        "stream": False,
-        "format": "json",
-    }
+def _parse_extraction(raw: str) -> dict | None:
+    """Parse JSON from an LLM response, stripping markdown fences if present."""
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = raw.split("```")[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
 
-    try:
-        response = client.post(
-            f"{OLLAMA_URL}/api/generate",
-            json=payload,
-            timeout=OLLAMA_TIMEOUT,
-        )
-        response.raise_for_status()
-        result = response.json()
-        raw_response = result.get("response", "")
-        log.debug(f"Ollama raw response: {raw_response[:200]}")
+    extracted = json.loads(raw)
 
-        # Attempt to parse JSON from the response
-        extracted = json.loads(raw_response)
+    valid_types = {"routine", "safety", "distress", "traffic"}
+    if extracted.get("message_type") not in valid_types:
+        extracted["message_type"] = "routine"
 
-        # Validate message_type is one of the expected values
-        valid_types = {"routine", "safety", "distress", "traffic"}
-        if extracted.get("message_type") not in valid_types:
-            extracted["message_type"] = "routine"
+    return extracted
 
-        return extracted
 
-    except httpx.HTTPStatusError as e:
-        log.error(f"Ollama HTTP error {e.response.status_code}: {e.response.text[:200]}")
-    except httpx.RequestError as e:
-        log.error(f"Ollama request failed: {e}")
-    except json.JSONDecodeError as e:
-        log.warning(f"Ollama returned non-JSON response: {e}")
-    except Exception as e:
-        log.error(f"Unexpected error calling Ollama: {e}")
-
-    # Fallback: return minimal structure
+def _default_extraction(text: str) -> dict:
     return {
         "vessel": None,
         "callsign": None,
@@ -116,26 +90,99 @@ def call_ollama(text: str, client: httpx.Client) -> dict:
     }
 
 
-def store_communication(redis_client: redis.Redis, communication: dict):
-    """Store communication in Redis list and publish update notification."""
-    comm_json = json.dumps(communication)
+def call_lm_studio(text: str, client: OpenAI) -> dict | None:
+    """Call LM Studio OpenAI-compatible API to extract structured data.
+    Returns None on failure so the caller can try a fallback."""
+    prompt = EXTRACTION_PROMPT.format(text=text)
 
+    try:
+        response = client.chat.completions.create(
+            model=LM_STUDIO_MODEL,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.1,
+            max_tokens=256,
+        )
+        raw = response.choices[0].message.content.strip()
+        log.debug(f"LM Studio response: {raw[:200]}")
+        return _parse_extraction(raw)
+
+    except APIConnectionError as e:
+        log.error(f"Cannot reach LM Studio at {LM_STUDIO_URL}: {e}")
+    except json.JSONDecodeError as e:
+        log.warning(f"LM Studio returned non-JSON: {e}")
+    except Exception as e:
+        log.error(f"Unexpected error calling LM Studio: {e}")
+
+    return None
+
+
+def call_gemini(text: str) -> dict | None:
+    """Fallback: call Google Gemini API for entity extraction."""
+    if not GEMINI_API_KEY:
+        log.debug("No GEMINI_API_KEY configured, skipping Gemini fallback")
+        return None
+
+    try:
+        import google.generativeai as genai
+
+        genai.configure(api_key=GEMINI_API_KEY)
+        model = genai.GenerativeModel(GEMINI_MODEL)
+
+        prompt = (
+            SYSTEM_PROMPT + "\n\n" + EXTRACTION_PROMPT.format(text=text)
+        )
+        response = model.generate_content(
+            prompt,
+            generation_config=genai.types.GenerationConfig(
+                temperature=0.1,
+                max_output_tokens=256,
+            ),
+        )
+        raw = response.text.strip()
+        log.debug(f"Gemini response: {raw[:200]}")
+        return _parse_extraction(raw)
+
+    except json.JSONDecodeError as e:
+        log.warning(f"Gemini returned non-JSON: {e}")
+    except Exception as e:
+        log.error(f"Gemini fallback failed: {e}")
+
+    return None
+
+
+def extract(text: str, lm_client: OpenAI) -> dict:
+    """Try LM Studio first, fall back to Gemini, then return defaults."""
+    result = call_lm_studio(text, lm_client)
+    if result is not None:
+        return result
+
+    log.info("LM Studio extraction failed, trying Gemini fallback...")
+    result = call_gemini(text)
+    if result is not None:
+        log.info("Gemini fallback succeeded")
+        return result
+
+    log.warning("All extraction backends failed, using defaults")
+    return _default_extraction(text)
+
+
+def store_communication(redis_client: redis.Redis, communication: dict):
+    comm_json = json.dumps(communication)
     pipe = redis_client.pipeline()
     pipe.lpush("communications", comm_json)
     pipe.ltrim("communications", 0, MAX_COMMUNICATIONS - 1)
     pipe.publish("communications_updates", comm_json)
     pipe.execute()
-
     log.info(
-        f"Stored communication id={communication['id']} "
-        f"vessel={communication['vessel']!r} "
-        f"type={communication['message_type']} "
-        f"summary={communication['summary'][:60]!r}"
+        f"Stored id={communication['id']} vessel={communication['vessel']!r} "
+        f"type={communication['message_type']} summary={communication['summary'][:60]!r}"
     )
 
 
 def wait_for_redis(redis_url: str, retries: int = 30, delay: float = 2.0) -> redis.Redis:
-    """Block until Redis is reachable, then return client."""
     for attempt in range(1, retries + 1):
         try:
             client = redis.from_url(redis_url, decode_responses=True)
@@ -146,62 +193,64 @@ def wait_for_redis(redis_url: str, retries: int = 30, delay: float = 2.0) -> red
             log.warning(f"Redis not ready (attempt {attempt}/{retries}): {e}")
             if attempt < retries:
                 time.sleep(delay)
-    log.error("Could not connect to Redis. Exiting.")
     raise SystemExit(1)
 
 
-def wait_for_ollama(ollama_url: str, retries: int = 30, delay: float = 5.0):
-    """Block until Ollama is reachable."""
-    log.info(f"Waiting for Ollama at {ollama_url}...")
+def wait_for_lm_studio(client: OpenAI, retries: int = 20, delay: float = 3.0) -> bool:
+    """Returns True if LM Studio came online, False otherwise."""
+    log.info(f"Waiting for LM Studio at {LM_STUDIO_URL}...")
     for attempt in range(1, retries + 1):
         try:
-            with httpx.Client() as client:
-                resp = client.get(f"{ollama_url}/api/tags", timeout=5.0)
-                resp.raise_for_status()
-            log.info("Ollama is ready.")
-            return
+            client.models.list()
+            log.info("LM Studio is ready.")
+            return True
         except Exception as e:
-            log.warning(f"Ollama not ready (attempt {attempt}/{retries}): {e}")
+            log.warning(f"LM Studio not ready (attempt {attempt}/{retries}): {e}")
             if attempt < retries:
                 time.sleep(delay)
-    log.error("Could not reach Ollama. Exiting.")
-    raise SystemExit(1)
+    return False
 
 
 def main():
-    log.info("VHF14 Extractor starting")
-    log.info(f"Redis URL: {REDIS_URL}")
-    log.info(f"Ollama URL: {OLLAMA_URL}, model: {OLLAMA_MODEL}")
+    log.info(f"VHF14 Extractor starting — LM Studio: {LM_STUDIO_URL}, model: {LM_STUDIO_MODEL}")
+    if GEMINI_API_KEY:
+        log.info(f"Gemini fallback enabled (model: {GEMINI_MODEL})")
+    else:
+        log.info("Gemini fallback not configured (no GEMINI_API_KEY)")
 
     redis_client = wait_for_redis(REDIS_URL)
-    wait_for_ollama(OLLAMA_URL)
+
+    lm_client = OpenAI(base_url=LM_STUDIO_URL, api_key="lm-studio")
+    lm_ready = wait_for_lm_studio(lm_client)
+
+    if not lm_ready and not GEMINI_API_KEY:
+        log.error("LM Studio unavailable and no Gemini fallback configured — exiting")
+        raise SystemExit(1)
+    if not lm_ready:
+        log.warning("LM Studio unavailable — will rely on Gemini fallback")
 
     pubsub = redis_client.pubsub(ignore_subscribe_messages=True)
     pubsub.subscribe("transcriptions")
-    log.info("Subscribed to Redis channel 'transcriptions'. Waiting for messages...")
+    log.info("Subscribed to 'transcriptions'. Waiting for messages...")
 
-    with httpx.Client() as http_client:
-        for message in pubsub.listen():
-            if message["type"] != "message":
-                continue
+    for message in pubsub.listen():
+        if message["type"] != "message":
+            continue
 
-            raw_data = message["data"]
-            try:
-                transcription = json.loads(raw_data)
-            except json.JSONDecodeError as e:
-                log.error(f"Failed to parse transcription message: {e} — data: {raw_data[:200]}")
-                continue
+        try:
+            transcription = json.loads(message["data"])
+        except json.JSONDecodeError as e:
+            log.error(f"Failed to parse message: {e}")
+            continue
 
-            text = transcription.get("text", "").strip()
-            if not text:
-                log.warning("Received transcription with empty text, skipping.")
-                continue
+        text = transcription.get("text", "").strip()
+        if not text:
+            continue
 
-            log.info(f"Processing transcription id={transcription.get('id')} text={text[:80]!r}")
-
-            extracted = call_ollama(text, http_client)
-            communication = build_communication(transcription, extracted)
-            store_communication(redis_client, communication)
+        log.info(f"Processing id={transcription.get('id')} text={text[:80]!r}")
+        extracted = extract(text, lm_client)
+        communication = build_communication(transcription, extracted)
+        store_communication(redis_client, communication)
 
 
 if __name__ == "__main__":
