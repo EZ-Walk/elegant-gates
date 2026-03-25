@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """
-End-to-end test: Drop a WAV file into the pipeline and verify the vessel
+End-to-end test: Drop an audio file into the pipeline and verify the vessel
 appears in Redis and on the map API with its name and course.
 
 Prerequisites:
   - docker compose up  (redis, transcriber, extractor, map)
   - pip install -r tests/requirements.txt
+  - ffmpeg (only needed if passing non-WAV files like .m4a, .mp3, .ogg)
 
 Usage:
-  pytest tests/test_vessel_tracking.py -v --wav path/to/voice_memo.wav
+  pytest tests/test_vessel_tracking.py -v --audio path/to/voice_memo.m4a
+  pytest tests/test_vessel_tracking.py -v --audio path/to/recording.wav
 
-The WAV file should contain a spoken message mentioning a vessel name and
+The audio file should contain a spoken message mentioning a vessel name and
 heading/course (e.g. "Motor vessel Pacific Star, heading two-seven-zero,
 position 47.6 north 122.4 west").
 """
@@ -18,6 +20,7 @@ position 47.6 north 122.4 west").
 import json
 import os
 import shutil
+import subprocess
 import threading
 import time
 import uuid
@@ -46,21 +49,21 @@ PIPELINE_TIMEOUT = int(os.environ.get("PIPELINE_TIMEOUT", "120"))
 
 def pytest_addoption(parser):
     parser.addoption(
-        "--wav",
+        "--audio",
         action="store",
         default=None,
-        help="Path to a WAV file containing a vessel name and heading",
+        help="Path to an audio file (WAV, M4A, MP3, OGG, etc.) containing a vessel name and heading",
     )
 
 
 @pytest.fixture
-def wav_path(request):
-    path = request.config.getoption("--wav")
+def audio_path(request):
+    path = request.config.getoption("--audio")
     if path is None:
-        pytest.skip("No --wav file provided; pass --wav <file> to run this test")
+        pytest.skip("No --audio file provided; pass --audio <file> to run this test")
     path = os.path.abspath(path)
     if not os.path.isfile(path):
-        pytest.fail(f"WAV file not found: {path}")
+        pytest.fail(f"Audio file not found: {path}")
     return path
 
 
@@ -122,13 +125,53 @@ class CommunicationCatcher:
                     pass
 
 
-def drop_wav_into_pipeline(wav_path: str) -> str:
-    """Copy WAV file into shared/recordings with a unique name.
+SUPPORTED_WAV_EXTENSIONS = {".wav"}
+CONVERTIBLE_EXTENSIONS = {".m4a", ".mp3", ".ogg", ".flac", ".aac", ".wma", ".opus"}
+
+
+def convert_to_wav(src_path: str, dest_path: str):
+    """Convert any audio format to 16kHz mono WAV using ffmpeg."""
+    try:
+        subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-i", src_path,
+                "-ar", "16000",    # 16kHz sample rate (optimal for Whisper)
+                "-ac", "1",        # mono
+                "-sample_fmt", "s16",  # 16-bit signed int
+                dest_path,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        raise RuntimeError(
+            "ffmpeg not found. Install ffmpeg to convert non-WAV audio files. "
+            "Alternatively, convert your file to WAV manually."
+        )
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"ffmpeg conversion failed: {e.stderr}")
+
+
+def drop_audio_into_pipeline(audio_path: str) -> str:
+    """Copy or convert an audio file into shared/recordings as WAV.
     Returns the destination filename."""
+    ext = os.path.splitext(audio_path)[1].lower()
     dest_name = f"test_{uuid.uuid4().hex[:8]}_{int(time.time())}.wav"
     dest_path = os.path.join(RECORDINGS_DIR, dest_name)
     os.makedirs(RECORDINGS_DIR, exist_ok=True)
-    shutil.copy2(wav_path, dest_path)
+
+    if ext in SUPPORTED_WAV_EXTENSIONS:
+        shutil.copy2(audio_path, dest_path)
+    elif ext in CONVERTIBLE_EXTENSIONS:
+        convert_to_wav(audio_path, dest_path)
+    else:
+        raise ValueError(
+            f"Unsupported audio format '{ext}'. "
+            f"Supported: {SUPPORTED_WAV_EXTENSIONS | CONVERTIBLE_EXTENSIONS}"
+        )
+
     return dest_name
 
 
@@ -140,11 +183,11 @@ def drop_wav_into_pipeline(wav_path: str) -> str:
 class TestVesselTracking:
     """End-to-end: WAV file in -> vessel visible on map with name & course."""
 
-    def test_pipeline_processes_wav_and_extracts_vessel(
-        self, wav_path, redis_client
+    def test_pipeline_processes_audio_and_extracts_vessel(
+        self, audio_path, redis_client
     ):
         """
-        1. Drop a WAV with ship name + heading into shared/recordings/
+        1. Drop an audio file (WAV, M4A, etc.) into shared/recordings/
         2. Wait for the pipeline (transcriber -> extractor) to produce a
            communication in Redis
         3. Verify the communication has a vessel name
@@ -156,9 +199,9 @@ class TestVesselTracking:
         catcher.start()
 
         try:
-            # --- Drop the WAV file ---
-            dest_name = drop_wav_into_pipeline(wav_path)
-            print(f"\n  Dropped WAV as: {dest_name}")
+            # --- Drop the audio file (convert to WAV if needed) ---
+            dest_name = drop_audio_into_pipeline(audio_path)
+            print(f"\n  Dropped audio as: {dest_name}")
             print(f"  Waiting up to {PIPELINE_TIMEOUT}s for pipeline...")
 
             # --- Wait for the communication ---
