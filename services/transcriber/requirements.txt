@@ -1,4 +1,3 @@
-openai-whisper
+faster-whisper
 redis
 watchdog
-numpy

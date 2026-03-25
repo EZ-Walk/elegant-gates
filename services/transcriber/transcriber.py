@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import redis
-import whisper
+from faster_whisper import WhisperModel
 from watchdog.events import FileSystemEventHandler, FileCreatedEvent
 from watchdog.observers import Observer
 
@@ -74,16 +74,11 @@ class RecordingHandler(FileSystemEventHandler):
         start = time.monotonic()
 
         try:
-            result = self.model.transcribe(
-                str(path),
-                fp16=False,  # fp16 causes issues on CPU
-                language="en",
-            )
+            segments, _ = self.model.transcribe(str(path), language="en", beam_size=5)
+            text = " ".join(seg.text for seg in segments).strip()
         except Exception as e:
             log.error(f"Whisper transcription failed for {path.name}: {e}")
             return
-
-        text = result.get("text", "").strip()
         elapsed = time.monotonic() - start
         log.info(f"Transcribed {path.name} in {elapsed:.1f}s: {text[:80]!r}{'...' if len(text) > 80 else ''}")
 
@@ -130,7 +125,7 @@ def main():
     redis_client = wait_for_redis(REDIS_URL)
 
     log.info(f"Loading Whisper model '{WHISPER_MODEL}'...")
-    model = whisper.load_model(WHISPER_MODEL)
+    model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
     log.info("Whisper model loaded.")
 
     recordings_path = Path(RECORDINGS_DIR)
