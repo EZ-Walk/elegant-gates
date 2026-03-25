@@ -39,7 +39,10 @@ services:
     restart: unless-stopped
 
   map:
-    build: ./services/map
+    build:
+      context: ./services/map
+      args:
+        VITE_MAPBOX_TOKEN: ${MAPBOX_TOKEN}
     ports:
       - "3000:3000"
     depends_on:
@@ -47,7 +50,6 @@ services:
         condition: service_healthy
     environment:
       - REDIS_URL=redis://redis:6379
-      - VITE_MAPBOX_TOKEN=${MAPBOX_TOKEN}
     restart: unless-stopped
 
 volumes:

@@ -6,9 +6,9 @@ import { useSSE } from "./hooks/useSSE.js";
 // Mapbox token injected at build time via Vite
 mapboxgl.accessToken = import.meta.env.VITE_MAPBOX_TOKEN || "";
 
-// Puget Sound / Pacific Northwest
-const DEFAULT_CENTER = [-122.4, 47.6];
-const DEFAULT_ZOOM = 9;
+// San Francisco Bay
+const DEFAULT_CENTER = [-122.4, 37.8];
+const DEFAULT_ZOOM = 20;
 
 const MESSAGE_TYPE_COLORS = {
   distress: "#e53935",
