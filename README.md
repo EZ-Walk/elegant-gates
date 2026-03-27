@@ -127,6 +127,86 @@ python recorder.py --list-devices
 python recorder.py --device 0 --remote ez@ethans-sidequest:/path/to/vhf14/shared/recordings/ --cleanup
 ```
 
+## Complete Setup Guide
+
+This section provides detailed setup instructions for deploying VHF14 on a remote Mac system.
+
+### Prerequisites
+
+- **Remote Mac**: Intel Mac with SSH access
+- **Docker/OrbStack**: Container runtime installed on the Mac
+- **Git**: For cloning the repository
+- **Environment Variables**: Gemini API key and Mapbox token
+
+### Step 1: Clone and Configure Repository
+
+```bash
+# On the remote Mac
+git clone https://github.com/your-username/vhf14.git
+cd vhf14
+
+# Create environment file with required variables
+cp .env.example .env
+# Edit .env and set your actual API keys:
+#   - MAPBOX_TOKEN: Get from https://account.mapbox.com/access-tokens/
+#   - VITE_MAPBOX_TOKEN: Same as MAPBOX_TOKEN (required for build process)  
+#   - GEMINI_API_KEY: Get from https://makersuite.google.com/app/apikey
+```
+
+### Step 2: Verify Docker Installation
+
+```bash
+# Check if Docker is installed and accessible
+which docker
+docker --version
+
+# If using OrbStack, ensure CLI tools are in PATH
+export PATH="/usr/local/bin:$PATH"
+```
+
+### Step 3: Build and Start Services
+
+```bash
+# Start all services (will build containers on first run)
+make up
+
+# Alternative: Use docker-compose directly
+docker compose up -d
+
+# Check service status
+docker compose ps
+```
+
+### Step 4: Verify Services
+
+```bash
+# Check logs for any issues
+docker compose logs
+
+# Test API endpoint
+curl http://localhost:3000/api/communications
+
+# Verify map frontend is accessible
+curl -I http://localhost:3000/
+```
+
+### Step 5: Expose Services (Optional)
+
+```bash
+# Using Tailscale Funnel for external access
+tailscale funnel --bg 3000
+
+# Or use ngrok for testing
+ngrok http 3000
+```
+
+### Common Issues and Solutions
+
+1. **OrbStack Permission Issues**: Ensure OrbStack app is running and CLI tools are installed
+2. **Environment Variables Not Loading**: Restart containers after modifying `.env`
+3. **Map Not Loading**: Check that `VITE_MAPBOX_TOKEN` is set correctly (see docs/errors/ for details)
+4. **Docker Build Failures**: Try `docker compose build --no-cache` to rebuild without cache
+
 ### Local development (all-in-one)
 
 ```bash
