@@ -10,8 +10,8 @@ mapboxgl.accessToken = import.meta.env.VITE_MAPBOX_TOKEN || "";
 // Falls back to relative paths for local development.
 const API_BASE = import.meta.env.VITE_API_URL || "";
 
-// San Francisco Bay
-const DEFAULT_CENTER = [-122.4, 37.8];
+// Treasure Island, San Francisco Bay
+const DEFAULT_CENTER = [-122.371, 37.827];
 const DEFAULT_ZOOM = 20;
 
 const MESSAGE_TYPE_COLORS = {
@@ -139,7 +139,7 @@ export default function App() {
 
     const map = new mapboxgl.Map({
       container: mapContainerRef.current,
-      style: "mapbox://styles/mapbox/dark-v11",
+      style: "mapbox://styles/mapbox/light-v11",
       center: DEFAULT_CENTER,
       zoom: DEFAULT_ZOOM,
     });
