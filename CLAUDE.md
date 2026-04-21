@@ -4,20 +4,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-VHF14 is a marine radio monitor system designed to capture, transcribe, and analyze VHF marine radio communications. The system is distributed across three physical nodes — a Raspberry Pi on the boat, an Intel Mac for processing, and Vercel for the frontend.
+VHF14 is a marine radio monitor system designed to capture, transcribe, and analyze VHF marine radio communications. Audio is captured in the browser via a voice-activity-triggered flow, processed on an Intel Mac, and served to a Vercel-hosted frontend.
 
 ## Architecture
-
-The system is split across three nodes:
-
-### Raspberry Pi (boat)
-- **recorder** — captures VHF radio audio in 30-second WAV chunks, rsyncs to the Mac
 
 ### Intel Mac (`ez@ethans-sidequest`)
 - **transcriber** — Whisper AI, watches `shared/recordings/` for new WAVs
 - **extractor** — Gemini API, subscribes to Redis `transcriptions` channel
 - **redis** — message bus + data store (Docker internal, port 6379)
-- **api** — Express + SSE server (port 3000), exposed via Tailscale Funnel
+- **api** — Express + SSE server (port 3000), also accepts WAV uploads at `POST /api/audio`; exposed via Tailscale Funnel
+
+### Browser (any authorized device; primary is the Mac's own browser)
+- **capture** — silero-vad in-browser (`@ricky0123/vad-web`) detects speech, uploads 16kHz mono WAV segments to the API; shows a floating waveform modal while actively capturing
 
 ### Vercel
 - **map frontend** — React + Mapbox GL static SPA, calls the Mac's API via `VITE_API_URL`
@@ -43,13 +41,8 @@ npm run dev          # Vite dev server on :5173, proxies /api to localhost:3000
 npm run build        # build to services/map/dist/
 ```
 
-### Raspberry Pi — start recorder
-```bash
-python recorder.py --list-devices
-python recorder.py --device 0 \
-  --remote ez@ethans-sidequest:/path/to/vhf14/shared/recordings/ \
-  --cleanup
-```
+### Start capture
+Open the frontend URL in a browser on the machine with the VHF audio feed. Click **Capture**, grant mic permission, and pick the VHF input device from the dropdown. The selected device persists in `localStorage`. Keep the tab foregrounded — Web Audio is throttled in backgrounded tabs.
 
 ### Vercel — deploy frontend
 ```bash
@@ -82,21 +75,22 @@ make clean           # rm -f shared/recordings/*.wav
 - `VITE_API_URL` — Tailscale Funnel URL (e.g. `https://ethans-sidequest.tail-xxxxx.ts.net`)
 
 ## Data Flow
-1. **recorder** (Pi) writes `recording_YYYYMMDD_HHMMSS.wav` → rsyncs to Mac's `shared/recordings/`
-2. **transcriber** (Mac) detects new WAV, Whisper transcribes → publishes to Redis `transcriptions` channel
-3. **extractor** (Mac) subscribes to `transcriptions`, calls Gemini → writes to Redis `communications` list + publishes to `communications_updates` channel
-4. **api** (Mac) serves `GET /api/communications` (LRANGE) and `GET /api/stream` (SSE, subscribes to `communications_updates`)
-5. **frontend** (Vercel) fetches initial data + maintains SSE connection via the Tailscale Funnel URL
+1. **browser capture** runs silero-vad locally; on speech end it encodes a 16kHz mono WAV and `POST`s it to `/api/audio`
+2. **api** writes the upload into `shared/recordings/recording_YYYYMMDD_HHMMSS.wav` (atomic `.tmp` → rename)
+3. **transcriber** (Mac) detects new WAV, Whisper transcribes → publishes to Redis `transcriptions` channel
+4. **extractor** (Mac) subscribes to `transcriptions`, calls Gemini → writes to Redis `communications` list + publishes to `communications_updates` channel
+5. **api** (Mac) serves `GET /api/communications` (LRANGE) and `GET /api/stream` (SSE, subscribes to `communications_updates`)
+6. **frontend** (Vercel) fetches initial data + maintains SSE connection via the Tailscale Funnel URL
 
 ## Service Communication
-- Recorder → Transcriber: filesystem (`shared/recordings/`), transferred via rsync over SSH
+- Browser → API: HTTPS `POST /api/audio` with `Content-Type: audio/wav` (via Tailscale Funnel)
+- API → filesystem: writes to `shared/recordings/` (Docker volume)
 - Transcriber → Extractor: Redis pub/sub (`transcriptions` channel)
 - Extractor → API: Redis list (`communications`) + pub/sub (`communications_updates`)
 - API → Frontend: REST (JSON) + SSE (Server-Sent Events) via Tailscale Funnel HTTPS
 
 ## File Structure
-- `shared/recordings/` — audio files shared between recorder (Pi) and transcriber (Mac Docker volume)
-- `services/recorder/` — Pi recorder service
+- `shared/recordings/` — WAV files written by the API, consumed by the transcriber (Docker volume)
 - `services/transcriber/` — Whisper transcription service
 - `services/extractor/` — LLM extraction service
 - `services/map/api/` — Express API server

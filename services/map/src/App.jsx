@@ -1,7 +1,10 @@
 import React, { useEffect, useRef, useState, useCallback } from "react";
 import mapboxgl from "mapbox-gl";
 import { CommunicationList } from "./components/CommunicationList.jsx";
+import { CaptureControls } from "./components/CaptureControls.jsx";
+import { SpeechModal } from "./components/SpeechModal.jsx";
 import { useSSE } from "./hooks/useSSE.js";
+import { useAudioCapture } from "./hooks/useAudioCapture.js";
 
 // Mapbox token injected at build time via Vite
 mapboxgl.accessToken = import.meta.env.VITE_MAPBOX_TOKEN || "";
@@ -130,6 +133,7 @@ export default function App() {
   const [mapReady, setMapReady] = useState(false);
 
   const { events: sseEvents, connected, error: sseError } = useSSE(`${API_BASE}/api/stream`);
+  const capture = useAudioCapture({ apiBase: API_BASE });
 
   // -------------------------------------------------------------------------
   // Initialize Mapbox
@@ -271,6 +275,16 @@ export default function App() {
           </div>
         </div>
 
+        <CaptureControls
+          devices={capture.devices}
+          deviceId={capture.deviceId}
+          setDeviceId={capture.setDeviceId}
+          enabled={capture.enabled}
+          setEnabled={capture.setEnabled}
+          status={capture.status}
+          error={capture.error}
+        />
+
         <CommunicationList
           communications={communications}
           selectedId={selectedId}
@@ -285,6 +299,8 @@ export default function App() {
           <div style={styles.errorBanner}>{sseError}</div>
         )}
       </div>
+
+      <SpeechModal analyser={capture.analyser} isSpeaking={capture.isSpeaking} />
     </div>
   );
 }

@@ -1,13 +1,10 @@
-.PHONY: up down record pull-model logs clean test
+.PHONY: up down pull-model logs clean test
 
 up:
 	docker compose up -d
 
 down:
 	docker compose down
-
-record:
-	cd services/recorder && python recorder.py
 
 pull-model:
 	docker compose exec ollama ollama pull phi3

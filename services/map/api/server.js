@@ -3,12 +3,16 @@
 const express = require("express");
 const cors = require("cors");
 const Redis = require("ioredis");
+const fs = require("fs");
+const path = require("path");
 
 const PORT = 3000;
 const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
+const RECORDINGS_DIR = process.env.RECORDINGS_DIR || "/app/recordings";
 const COMMUNICATIONS_KEY = "communications";
 const UPDATES_CHANNEL = "communications_updates";
 const MAX_FETCH = 50;
+const MAX_AUDIO_BYTES = 20 * 1024 * 1024; // 20 MiB
 
 const app = express();
 app.use(cors());
@@ -62,6 +66,57 @@ app.get("/api/communications", async (req, res) => {
     res.status(500).json({ error: "Failed to fetch communications" });
   }
 });
+
+// ---------------------------------------------------------------------------
+// POST /api/audio
+// Accepts a WAV upload and writes it into the shared recordings directory
+// using the recording_YYYYMMDD_HHMMSS.wav filename convention the downstream
+// transcriber expects. Writes atomically via .tmp + rename.
+// ---------------------------------------------------------------------------
+
+function timestampName(date = new Date()) {
+  const pad = (n) => String(n).padStart(2, "0");
+  const y = date.getFullYear();
+  const mo = pad(date.getMonth() + 1);
+  const d = pad(date.getDate());
+  const h = pad(date.getHours());
+  const mi = pad(date.getMinutes());
+  const s = pad(date.getSeconds());
+  return `recording_${y}${mo}${d}_${h}${mi}${s}.wav`;
+}
+
+app.post(
+  "/api/audio",
+  express.raw({ type: "audio/wav", limit: MAX_AUDIO_BYTES }),
+  async (req, res) => {
+    const body = req.body;
+    if (!Buffer.isBuffer(body) || body.length < 44) {
+      return res.status(400).json({ error: "Empty or too-small body" });
+    }
+    // RIFF....WAVE header sanity check
+    if (
+      body.slice(0, 4).toString("ascii") !== "RIFF" ||
+      body.slice(8, 12).toString("ascii") !== "WAVE"
+    ) {
+      return res.status(400).json({ error: "Not a WAV file" });
+    }
+
+    const finalName = timestampName();
+    const finalPath = path.join(RECORDINGS_DIR, finalName);
+    const tmpPath = `${finalPath}.tmp`;
+
+    try {
+      await fs.promises.writeFile(tmpPath, body);
+      await fs.promises.rename(tmpPath, finalPath);
+      console.log(`[api] Wrote ${finalName} (${body.length} bytes)`);
+      res.json({ file: finalName, bytes: body.length });
+    } catch (err) {
+      console.error("[api] /api/audio write failed:", err.message);
+      fs.promises.unlink(tmpPath).catch(() => {});
+      res.status(500).json({ error: "Failed to write recording" });
+    }
+  }
+);
 
 // ---------------------------------------------------------------------------
 // GET /api/stream
