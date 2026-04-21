@@ -24,21 +24,21 @@ VHF14 captures that radio traffic and turns it into a persistent, visual picture
 
 ## System Architecture
 
-VHF14 runs distributed across three nodes. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for full details.
+VHF14 runs on an Intel Mac, with audio captured from a browser tab and the map served from Vercel. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for full details.
 
 ```mermaid
 graph TB
     radio["📻 VHF Radio\n(Channel 14)"]
     user["🧑‍✈️ Mariner /\nHarbor Operator"]
 
-    subgraph pi["Raspberry Pi (boat)"]
-        recorder["Record Service\n(captures audio → WAV)"]
+    subgraph browser["Browser (capture tab)"]
+        capture["Capture UI\n(silero-vad + Web Audio)\nfloating waveform modal"]
     end
 
     subgraph mac["Intel Mac (ethans-sidequest)"]
         transcriber["Transcription Service\n(Whisper AI)"]
         extractor["Entity Recognition\n(Gemini API)"]
-        api["Map API\n(Express + SSE, port 3000)"]
+        api["Map API\n(Express + SSE, port 3000)\nPOST /api/audio"]
         db[("Redis\n(data store + message bus)")]
     end
 
@@ -46,8 +46,9 @@ graph TB
         frontend["Map Frontend\n(React + Mapbox GL)"]
     end
 
-    radio -->|audio stream| recorder
-    recorder -->|WAV via rsync/SSH| transcriber
+    radio -->|audio input device| capture
+    capture -->|WAV via POST /api/audio| api
+    api -->|writes WAV| transcriber
     transcriber -->|pub/sub: transcriptions| extractor
     extractor -->|list + pub/sub: communications| db
     db -->|LRANGE + subscribe| api
@@ -57,11 +58,12 @@ graph TB
 
 ## Data Flow
 
-1. **Record** — audio is captured from the radio's audio output in 30-second WAV chunks on the Pi and rsynced to the Mac's `shared/recordings/`
-2. **Transcribe** — Whisper detects new files and converts speech to text; raw transcripts are published to the Redis `transcriptions` channel
-3. **Extract** — Gemini reads each transcript and pulls out: vessel name, callsign, VHF channel, message type, position, and a plain-English summary
-4. **Store** — structured records are kept in the Redis `communications` list (last 100 retained)
-5. **Visualize** — the map API streams new records to the browser via SSE; vessels with known positions appear as color-coded markers
+1. **Capture** — a browser tab on the machine connected to the VHF audio feed runs silero-vad; when speech is detected, a floating waveform modal appears, and on speech end the segment is encoded as a 16kHz mono WAV and POSTed to `/api/audio`
+2. **Ingest** — the API writes the upload into `shared/recordings/recording_YYYYMMDD_HHMMSS.wav` (atomic rename)
+3. **Transcribe** — Whisper detects the new file and converts speech to text; raw transcripts are published to the Redis `transcriptions` channel
+4. **Extract** — Gemini reads each transcript and pulls out: vessel name, callsign, VHF channel, message type, position, and a plain-English summary
+5. **Store** — structured records are kept in the Redis `communications` list (last 100 retained)
+6. **Visualize** — the map API streams new records to the browser via SSE; vessels with known positions appear as color-coded markers
 
 ## Message Types
 
@@ -76,10 +78,10 @@ graph TB
 
 | Service | Technology | Node | Role |
 |---------|-----------|------|------|
-| `recorder` | Python / sounddevice | Raspberry Pi | Captures microphone audio → WAV |
+| `capture` | `@ricky0123/vad-web` + Web Audio | Browser | Voice-activity-triggered WAV upload |
 | `transcriber` | Python / Whisper | Intel Mac | Speech-to-text |
 | `extractor` | Python / Gemini API | Intel Mac | Named entity + intent extraction |
-| `api` | Express + ioredis | Intel Mac | REST + SSE API for the frontend |
+| `api` | Express + ioredis | Intel Mac | REST + SSE API + audio ingest (`POST /api/audio`) |
 | `redis` | Redis 7 | Intel Mac | Message bus + data store |
 | `frontend` | React + Mapbox GL | Vercel | Web visualization (static SPA) |
 
@@ -111,21 +113,16 @@ vercel deploy
 #   VITE_API_URL      = your Tailscale Funnel URL
 ```
 
-### Raspberry Pi (recorder)
+### Capture (browser)
 
-```bash
-# First-time setup: SSH key auth to the Mac
-ssh-keygen -t ed25519 && ssh-copy-id ez@ethans-sidequest
+Plug the VHF radio's audio output into an input device on the Mac (e.g. USB audio adapter line-in). Then, in a Chrome or Safari tab on that Mac:
 
-# Install dependencies
-pip install sounddevice soundfile numpy
+1. Open the frontend URL (Vercel deployment or `http://localhost:5173` in dev).
+2. Click **Capture** in the sidebar. Grant microphone permission.
+3. Pick the VHF input device from the dropdown. The selection is persisted per-browser.
+4. While someone is transmitting, a floating pill modal appears at the bottom of the screen with a live waveform. On silence, the segment is uploaded to the Mac API and flows through the pipeline.
 
-# List audio devices
-python recorder.py --list-devices
-
-# Start recording and uploading to the Mac
-python recorder.py --device 0 --remote ez@ethans-sidequest:/path/to/vhf14/shared/recordings/ --cleanup
-```
+Keep the capture tab foregrounded — browsers throttle Web Audio in hidden tabs.
 
 ## Complete Setup Guide
 

@@ -47,8 +47,11 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+    volumes:
+      - ./shared/recordings:/app/recordings
     environment:
       - REDIS_URL=redis://redis:6379
+      - RECORDINGS_DIR=/app/recordings
     restart: unless-stopped
 
 volumes:

@@ -1,19 +1,19 @@
 # VHF14 Architecture
 
-Distributed across three physical nodes. The Mac must be online for data to flow; the Vercel frontend remains accessible regardless.
+Audio is captured in a browser tab, processed on an Intel Mac, and served from Vercel. The Mac must be online for data to flow; the Vercel frontend remains accessible regardless.
 
 ---
 
 ## Nodes
 
-### Raspberry Pi — `vhf14-recorder`
-- **Role**: Audio capture
-- **Location**: On the boat, wired to the VHF radio audio output
-- **Services**: `recorder` (runs as a Python process, not in Docker)
-- **Process management**: systemd service or manual `python recorder.py`
+### Capture browser
+- **Role**: Audio capture and voice-activity detection
+- **Location**: A Chrome or Safari tab running on the machine connected to the VHF radio's audio output (typically the Mac itself)
+- **Implementation**: `services/map/src/hooks/useAudioCapture.js` — `getUserMedia` + silero-vad (`@ricky0123/vad-web`). On `onSpeechEnd`, encodes 16kHz mono Float32 PCM into a WAV Blob and POSTs it to `/api/audio`.
+- **UI**: Floating pill modal (`SpeechModal.jsx`) appears while speech is active.
 
 ### Intel Mac — `ez@ethans-sidequest`
-- **Role**: ML processing, data store, API
+- **Role**: Audio ingest, ML processing, data store, API
 - **Services**: `transcriber`, `extractor`, `redis`, `api` (all via Docker Compose)
 - **SSH access**: `ssh ez@ethans-sidequest`
 - **Public API**: Exposed on port 3000 via Tailscale Funnel
@@ -29,16 +29,17 @@ Distributed across three physical nodes. The Mac must be online for data to flow
 ## Network Topology
 
 ```
-[Raspberry Pi]
-  recorder.py
-    │  rsync over SSH (local network or Tailscale)
+[Capture browser]
+  silero-vad
+  WAV encoder
+    │  HTTPS POST /api/audio (via Tailscale Funnel)
     ▼
 [Intel Mac — ethans-sidequest]
+  api                   ← Express + SSE, port 3000; also writes shared/recordings/
   shared/recordings/    ← WAV files land here
   transcriber           ← Whisper, reads from shared/recordings/
   extractor             ← Gemini API, reads Redis pub/sub
   redis                 ← data store + message bus (Docker internal)
-  api                   ← Express + SSE, port 3000
     │  Tailscale Funnel (HTTPS)
     ▼
 [Internet]
@@ -57,7 +58,7 @@ Distributed across three physical nodes. The Mac must be online for data to flow
 
 | Service | Node | Managed by | Port |
 |---|---|---|---|
-| recorder | Raspberry Pi | Python process (systemd or manual) | — |
+| capture | Browser | User-activated in the frontend UI | — |
 | transcriber | Intel Mac | Docker Compose | — (internal) |
 | extractor | Intel Mac | Docker Compose | — (internal) |
 | redis | Intel Mac | Docker Compose | 6379 (internal) |
@@ -105,12 +106,6 @@ Published by `extractor` (same payload as the `communications` list entry). Cons
 
 ## Environment Variables
 
-### Raspberry Pi
-No env vars. Configuration via CLI arguments:
-```
-python recorder.py --remote ez@ethans-sidequest:/path/to/vhf14/shared/recordings/ --cleanup
-```
-
 ### Intel Mac (`.env` in project root)
 | Variable | Default | Description |
 |---|---|---|
@@ -119,6 +114,7 @@ python recorder.py --remote ez@ethans-sidequest:/path/to/vhf14/shared/recordings
 | `GEMINI_MODEL` | `gemini-2.0-flash` | Gemini model name |
 | `LM_STUDIO_URL` | `http://host.docker.internal:1234/v1` | LM Studio endpoint (fallback if no Gemini key) |
 | `LM_STUDIO_MODEL` | `mlx-community/gemma-3-1b-it-qat-4bit` | LM Studio model name |
+| `RECORDINGS_DIR` | `/app/recordings` | Where the API writes uploaded WAVs (inside the api container; backed by the `./shared/recordings` host bind mount) |
 
 ### Vercel (set in Vercel project dashboard)
 | Variable | Description |
@@ -162,18 +158,22 @@ The Funnel URL (`https://<hostname>.tail-xxxxx.ts.net`) is stable across restart
 
 ---
 
-## Pi → Mac File Transfer Setup
+## Audio Ingest (`POST /api/audio`)
 
-SSH key-based auth is required for passwordless rsync:
+The capture browser encodes each detected speech segment as a 16-bit PCM mono WAV (16 kHz) and uploads it:
 
-```bash
-# On the Pi
-ssh-keygen -t ed25519 -C "vhf14-recorder"
-ssh-copy-id ez@ethans-sidequest
-
-# Test
-ssh ez@ethans-sidequest "echo ok"
-
-# Run recorder with upload
-python recorder.py --remote ez@ethans-sidequest:/absolute/path/to/vhf14/shared/recordings/ --cleanup
 ```
+POST /api/audio HTTP/1.1
+Content-Type: audio/wav
+Content-Length: <bytes>
+
+<RIFF...WAVE payload>
+```
+
+Server behavior (`services/map/api/server.js`):
+- Validates RIFF + WAVE magic bytes.
+- Writes to `${RECORDINGS_DIR}/recording_YYYYMMDD_HHMMSS.wav.tmp`, then `fs.rename` to the final `.wav`. The atomic rename prevents the transcriber's watchdog from picking up a partial write before it fully lands.
+- Max body size: 20 MiB.
+- Returns `{ "file": "...", "bytes": N }` on success.
+
+The transcriber's 2-second settle delay (`services/transcriber/transcriber.py:32`) is kept as belt-and-suspenders.
