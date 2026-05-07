@@ -39,10 +39,7 @@ services:
     restart: unless-stopped
 
   map:
-    build:
-      context: ./services/map
-      args:
-        VITE_MAPBOX_TOKEN: ${MAPBOX_TOKEN}
+    build: ./services/map
     ports:
       - "3000:3000"
     depends_on:
@@ -50,28 +47,8 @@ services:
         condition: service_healthy
     environment:
       - REDIS_URL=redis://redis:6379
-      - RECORDINGS_DIR=/app/recordings
-    volumes:
-      - ./shared/recordings:/app/recordings
-    restart: unless-stopped
-
-  # Vite dev server (hot reload). Proxies /api to the map service.
-  map-ui:
-    image: node:20-alpine
-    working_dir: /app
-    volumes:
-      - ./services/map:/app
-      - map-ui-node-modules:/app/node_modules
-    ports:
-      - "5173:5173"
-    environment:
-      - API_PROXY_TARGET=http://map:3000
-      - VITE_MAPBOX_TOKEN=${MAPBOX_TOKEN:-}
-    command: sh -c "npm install && exec npx vite --host 0.0.0.0 --port 5173"
-    depends_on:
-      - map
+      - VITE_MAPBOX_TOKEN=${MAPBOX_TOKEN}
     restart: unless-stopped
 
 volumes:
   redis-data:
-  map-ui-node-modules:

@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState, useCallback } from "react";
 import mapboxgl from "mapbox-gl";
 import { CommunicationList } from "./components/CommunicationList.jsx";
+import { BrowserCapturePanel } from "./components/BrowserCapturePanel.jsx";
 import { useSSE } from "./hooks/useSSE.js";
 
 // Mapbox token injected at build time via Vite
@@ -276,6 +277,8 @@ export default function App() {
           selectedId={selectedId}
           onSelect={handleSelect}
         />
+
+        <BrowserCapturePanel apiBase={API_BASE} />
       </aside>
 
       {/* Map */}

@@ -2,6 +2,10 @@
 
 up:
 	docker compose up -d
+	@echo ""
+	@echo "  Map UI (Vite, hot reload):  http://localhost:5173"
+	@echo "  Map UI + API (production): http://localhost:3000"
+	@echo ""
 
 down:
 	docker compose down
